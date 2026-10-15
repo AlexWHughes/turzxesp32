@@ -134,6 +134,9 @@ class ByteFramer {
         return false;
       }
       fill_ = 0;
+      if ((++flushes_ & 0x0F) == 0) {
+        yield();
+      }
     }
     buf_[fill_++] = value;
     if (!separate_ && fill_ == sizeof(buf_)) {
@@ -141,6 +144,9 @@ class ByteFramer {
       fill_ = 0;
       if (transport_.write(buf_, n) != n) {
         return false;
+      }
+      if ((++flushes_ & 0x0F) == 0) {
+        yield();
       }
     }
     return true;
@@ -150,6 +156,7 @@ class ByteFramer {
   bool separate_;
   uint8_t buf_[250] = {};
   size_t fill_ = 0;
+  uint16_t flushes_ = 0;
 };
 }  // namespace
 

@@ -1,6 +1,5 @@
 #include "web_ui.h"
 
-#include <LittleFS.h>
 #include <WiFi.h>
 
 #include "http_server.h"
@@ -21,15 +20,9 @@ void WebUi::begin(ConfigStore &store, ConfigChangedHandler onConfig,
   gOnConfig = onConfig;
   gOnBrightness = onBrightness;
 
-  // LittleFS is optional now — UI is embedded in firmware.
-  if (!LittleFS.begin(true)) {
-    Serial.println("[web] LittleFS mount failed (using embedded UI)");
-  }
-
   WebServer &server = httpServer();
 
   server.on("/", HTTP_GET, []() {
-    // Always serve firmware-embedded UI (avoids empty/stale LittleFS pages).
     httpServer().send_P(200, "text/html", kWebUiPage);
   });
 
@@ -40,7 +33,13 @@ void WebUi::begin(ConfigStore &store, ConfigChangedHandler onConfig,
     body += gUi ? gUi->status() : "unknown";
     body += "\",\"ip\":\"";
     body += ip.toString();
-    body += "\",\"firmware\":\"" FIRMWARE_VERSION "\",\"diag\":\"";
+    body += "\",\"firmware\":\"" FIRMWARE_VERSION "\"";
+    body += ",\"freeHeap\":";
+    body += String(ESP.getFreeHeap());
+    body += ",\"minFreeHeap\":";
+    body += String(ESP.getMinFreeHeap());
+    // diag kept for API consumers / debugging; not shown in the main WebUI.
+    body += ",\"diag\":\"";
     if (gUi) {
       String d = gUi->diag();
       d.replace("\\", "\\\\");
@@ -99,9 +98,32 @@ void WebUi::begin(ConfigStore &store, ConfigChangedHandler onConfig,
     s.send(200, "application/json", "{\"ok\":true}");
   });
 
-  server.serveStatic("/assets/", LittleFS, "/");
+  server.on("/api/testpattern", HTTP_POST, []() {
+    WebServer &s = httpServer();
+    if (!gUi || !gUi->store()) {
+      s.send(500, "application/json", "{\"error\":\"no store\"}");
+      return;
+    }
+    AppConfig cfg = gUi->store()->get();
+    if (s.hasArg("value")) {
+      cfg.testPattern = s.arg("value") == "1" || s.arg("value").equalsIgnoreCase("true");
+    } else {
+      cfg.testPattern = !cfg.testPattern;
+    }
+    if (!gUi->store()->save(cfg)) {
+      s.send(500, "application/json", "{\"error\":\"save failed\"}");
+      return;
+    }
+    if (gOnConfig) {
+      gOnConfig(cfg);
+    }
+    s.send(200, "application/json",
+           cfg.testPattern ? "{\"ok\":true,\"testPattern\":true}"
+                           : "{\"ok\":true,\"testPattern\":false}");
+  });
+
   server.begin();
-  Serial.println("[web] HTTP server on :80 (embedded UI)");
+  Serial.println("[web] HTTP server on :80");
 }
 
 void WebUi::loop() { httpServer().handleClient(); }

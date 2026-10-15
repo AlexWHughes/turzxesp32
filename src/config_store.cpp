@@ -16,7 +16,6 @@ AppConfig &ConfigStore::get() { return cfg_; }
 
 static void applySecrets(AppConfig &cfg) {
 #if defined(WIFI_SSID)
-  // secrets.h wins when filled in (skip the example placeholder).
   if (WIFI_SSID[0] != '\0' && strcmp(WIFI_SSID, "YourNetworkName") != 0) {
     cfg.wifiSsid = WIFI_SSID;
     cfg.wifiPassword = WIFI_PASSWORD;
@@ -37,20 +36,45 @@ static void applySecrets(AppConfig &cfg) {
 }
 
 static void applyWidgetDefaults(AppConfig &cfg) {
-  if (cfg.widgetLabels[0].isEmpty()) {
+  // Migrate legacy label/topic-only slots to mqtt_text.
+  bool anyTyped = false;
+  for (int i = 0; i < kMaxWidgets; ++i) {
+    if (!cfg.widgetTypes[i].isEmpty()) {
+      anyTyped = true;
+      break;
+    }
+  }
+  if (!anyTyped) {
+    bool hadLegacy = false;
+    for (int i = 0; i < kMaxWidgets; ++i) {
+      if (!cfg.widgetLabels[i].isEmpty() || !cfg.widgetTopics[i].isEmpty()) {
+        cfg.widgetTypes[i] = "mqtt_text";
+        hadLegacy = true;
+      }
+    }
+    if (hadLegacy) {
+      return;
+    }
+    cfg.widgetTypes[0] = "mqtt_text";
     cfg.widgetLabels[0] = "Living Room";
     cfg.widgetTopics[0] = "homeassistant/sensor/living_temp/state";
+    cfg.widgetTypes[1] = "mqtt_text";
     cfg.widgetLabels[1] = "Outdoor";
     cfg.widgetTopics[1] = "homeassistant/sensor/outdoor_temp/state";
-    cfg.widgetLabels[2] = "Power";
-    cfg.widgetTopics[2] = "homeassistant/sensor/house_power/state";
+    cfg.widgetTypes[2] = "world_clock";
+    cfg.widgetLabels[2] = "Melbourne";
+    cfg.widgetTz[2] = "UTC+10";
+    cfg.widgetTypes[3] = "weather";
+    cfg.widgetLabels[3] = "Weather";
+    cfg.widgetTypes[4] = "spotify";
+    cfg.widgetLabels[4] = "Now Playing";
   }
 }
 
 bool ConfigStore::load(AppConfig &cfg) {
   Preferences prefs;
-  // Read-only open fails with NOT_FOUND on first boot — still apply secrets.
   const bool haveNvs = prefs.begin(kNs, true);
+  bool migratedOrient = false;
   if (haveNvs) {
     cfg.wifiSsid = prefs.getString("wifiSsid", cfg.wifiSsid);
     cfg.wifiPassword = prefs.getString("wifiPass", cfg.wifiPassword);
@@ -62,12 +86,44 @@ bool ConfigStore::load(AppConfig &cfg) {
     cfg.haStatusTopic = prefs.getString("haStatus", cfg.haStatusTopic);
     cfg.brightness = prefs.getUChar("brightness", cfg.brightness);
     cfg.orientation = prefs.getUChar("orient", cfg.orientation);
+    // Migrate pre-1.3.1 mapping (0=P, 1=L, 2=RP, 3=RL) → upstream IntEnum
+    // (0=P, 1=RP, 2=L, 3=RL). Without this, saved "Landscape" (1) becomes
+    // ReversePortrait and the modes look swapped.
+    const uint8_t orientMap = prefs.getUChar("orMap", 0);
+    if (orientMap < 1) {
+      if (cfg.orientation == 1) {
+        cfg.orientation = 2;
+      } else if (cfg.orientation == 2) {
+        cfg.orientation = 1;
+      }
+      migratedOrient = true;  // stamp orMap on save so we don't re-migrate
+    }
     cfg.clockIntervalMs = prefs.getUShort("clockMs", cfg.clockIntervalMs);
+    // Migrate old 1 Hz default — it blocked the USB link with huge partials.
+    if (cfg.clockIntervalMs < 5000) {
+      cfg.clockIntervalMs = 15000;
+    }
     cfg.haDiscovery = prefs.getBool("haDisc", cfg.haDiscovery);
+    {
+      const uint8_t layoutRaw =
+          prefs.getUChar("layout", static_cast<uint8_t>(LayoutMode::Grid));
+      cfg.layoutMode = (layoutRaw == static_cast<uint8_t>(LayoutMode::Carousel))
+                           ? LayoutMode::Carousel
+                           : LayoutMode::Grid;
+    }
+    cfg.carouselIntervalMs = prefs.getUShort("carMs", cfg.carouselIntervalMs);
+    cfg.testPattern = prefs.getBool("testPat", cfg.testPattern);
+    cfg.weatherLat = prefs.getFloat("wLat", cfg.weatherLat);
+    cfg.weatherLon = prefs.getFloat("wLon", cfg.weatherLon);
+    cfg.weatherTz = prefs.getString("wTz", cfg.weatherTz);
+    cfg.weatherFahrenheit = prefs.getBool("wF", cfg.weatherFahrenheit);
 
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < kMaxWidgets; ++i) {
       cfg.widgetTopics[i] = prefs.getString(("wTopic" + String(i)).c_str(), cfg.widgetTopics[i]);
       cfg.widgetLabels[i] = prefs.getString(("wLabel" + String(i)).c_str(), cfg.widgetLabels[i]);
+      cfg.widgetTypes[i] = prefs.getString(("wType" + String(i)).c_str(), cfg.widgetTypes[i]);
+      cfg.widgetPaths[i] = prefs.getString(("wPath" + String(i)).c_str(), cfg.widgetPaths[i]);
+      cfg.widgetTz[i] = prefs.getString(("wWtz" + String(i)).c_str(), cfg.widgetTz[i]);
     }
     prefs.end();
   } else {
@@ -78,8 +134,7 @@ bool ConfigStore::load(AppConfig &cfg) {
   applySecrets(cfg);
   cfg_ = cfg;
 
-  // Persist secrets on first boot so later NVS opens succeed.
-  if (!haveNvs && !cfg.wifiSsid.isEmpty()) {
+  if ((!haveNvs && !cfg.wifiSsid.isEmpty()) || (haveNvs && migratedOrient)) {
     save(cfg);
   }
   return true;
@@ -100,11 +155,22 @@ bool ConfigStore::save(const AppConfig &cfg) {
   prefs.putString("haStatus", cfg.haStatusTopic);
   prefs.putUChar("brightness", cfg.brightness);
   prefs.putUChar("orient", cfg.orientation);
+  prefs.putUChar("orMap", 1);
   prefs.putUShort("clockMs", cfg.clockIntervalMs);
   prefs.putBool("haDisc", cfg.haDiscovery);
-  for (int i = 0; i < 6; ++i) {
+  prefs.putUChar("layout", static_cast<uint8_t>(cfg.layoutMode));
+  prefs.putUShort("carMs", cfg.carouselIntervalMs);
+  prefs.putBool("testPat", cfg.testPattern);
+  prefs.putFloat("wLat", cfg.weatherLat);
+  prefs.putFloat("wLon", cfg.weatherLon);
+  prefs.putString("wTz", cfg.weatherTz);
+  prefs.putBool("wF", cfg.weatherFahrenheit);
+  for (int i = 0; i < kMaxWidgets; ++i) {
     prefs.putString(("wTopic" + String(i)).c_str(), cfg.widgetTopics[i]);
     prefs.putString(("wLabel" + String(i)).c_str(), cfg.widgetLabels[i]);
+    prefs.putString(("wType" + String(i)).c_str(), cfg.widgetTypes[i]);
+    prefs.putString(("wPath" + String(i)).c_str(), cfg.widgetPaths[i]);
+    prefs.putString(("wWtz" + String(i)).c_str(), cfg.widgetTz[i]);
   }
   prefs.end();
   cfg_ = cfg;
@@ -127,11 +193,25 @@ String ConfigStore::toJson(bool includeSecrets) const {
   doc["orientation"] = cfg_.orientation;
   doc["clockIntervalMs"] = cfg_.clockIntervalMs;
   doc["haDiscovery"] = cfg_.haDiscovery;
+  doc["layoutMode"] = layoutModeToString(cfg_.layoutMode);
+  doc["carouselIntervalMs"] = cfg_.carouselIntervalMs;
+  doc["testPattern"] = cfg_.testPattern;
+  doc["weatherLat"] = cfg_.weatherLat;
+  doc["weatherLon"] = cfg_.weatherLon;
+  doc["weatherTz"] = cfg_.weatherTz;
+  doc["weatherFahrenheit"] = cfg_.weatherFahrenheit;
+
+  JsonArray types = doc["widgetTypes"].to<JsonArray>();
   JsonArray topics = doc["widgetTopics"].to<JsonArray>();
   JsonArray labels = doc["widgetLabels"].to<JsonArray>();
-  for (int i = 0; i < 6; ++i) {
+  JsonArray paths = doc["widgetPaths"].to<JsonArray>();
+  JsonArray tzs = doc["widgetTz"].to<JsonArray>();
+  for (int i = 0; i < kMaxWidgets; ++i) {
+    types.add(cfg_.widgetTypes[i]);
     topics.add(cfg_.widgetTopics[i]);
     labels.add(cfg_.widgetLabels[i]);
+    paths.add(cfg_.widgetPaths[i]);
+    tzs.add(cfg_.widgetTz[i]);
   }
   doc["firmware"] = FIRMWARE_VERSION;
   String out;
@@ -154,7 +234,7 @@ bool ConfigStore::applyJson(const String &json, bool saveToFlash) {
   if (doc["mqttHost"].is<const char *>()) {
     next.mqttHost = doc["mqttHost"].as<String>();
   }
-  if (doc["mqttPort"].is<uint16_t>()) {
+  if (doc["mqttPort"].is<uint16_t>() || doc["mqttPort"].is<int>()) {
     next.mqttPort = doc["mqttPort"].as<uint16_t>();
   }
   if (doc["mqttUser"].is<const char *>()) {
@@ -169,30 +249,72 @@ bool ConfigStore::applyJson(const String &json, bool saveToFlash) {
   if (doc["haStatusTopic"].is<const char *>()) {
     next.haStatusTopic = doc["haStatusTopic"].as<String>();
   }
-  if (doc["brightness"].is<uint8_t>()) {
+  if (doc["brightness"].is<uint8_t>() || doc["brightness"].is<int>()) {
     next.brightness = doc["brightness"].as<uint8_t>();
   }
-  if (doc["orientation"].is<uint8_t>()) {
+  if (doc["orientation"].is<uint8_t>() || doc["orientation"].is<int>()) {
     next.orientation = doc["orientation"].as<uint8_t>();
+    if (next.orientation > 3) {
+      next.orientation = 1;
+    }
   }
-  if (doc["clockIntervalMs"].is<uint16_t>()) {
+  if (doc["clockIntervalMs"].is<uint16_t>() || doc["clockIntervalMs"].is<int>()) {
     next.clockIntervalMs = doc["clockIntervalMs"].as<uint16_t>();
+    if (next.clockIntervalMs < 5000) {
+      next.clockIntervalMs = 5000;
+    }
   }
   if (doc["haDiscovery"].is<bool>()) {
     next.haDiscovery = doc["haDiscovery"].as<bool>();
   }
-  if (doc["widgetTopics"].is<JsonArray>()) {
-    JsonArray arr = doc["widgetTopics"].as<JsonArray>();
-    for (size_t i = 0; i < arr.size() && i < 6; ++i) {
-      next.widgetTopics[i] = arr[i].as<String>();
-    }
+  if (doc["layoutMode"].is<const char *>()) {
+    next.layoutMode = layoutModeFromString(doc["layoutMode"].as<String>());
   }
-  if (doc["widgetLabels"].is<JsonArray>()) {
-    JsonArray arr = doc["widgetLabels"].as<JsonArray>();
-    for (size_t i = 0; i < arr.size() && i < 6; ++i) {
-      next.widgetLabels[i] = arr[i].as<String>();
+  if (doc["carouselIntervalMs"].is<uint16_t>() || doc["carouselIntervalMs"].is<int>()) {
+    long carMs = doc["carouselIntervalMs"].as<long>();
+    if (carMs < 2000) {
+      carMs = 2000;
+    } else if (carMs > 65535) {
+      carMs = 65535;
     }
+    next.carouselIntervalMs = static_cast<uint16_t>(carMs);
   }
+  if (doc["testPattern"].is<bool>()) {
+    next.testPattern = doc["testPattern"].as<bool>();
+  } else if (doc["testPattern"].is<int>()) {
+    next.testPattern = doc["testPattern"].as<int>() != 0;
+  } else if (doc["testPattern"].is<const char *>()) {
+    const String v = doc["testPattern"].as<String>();
+    next.testPattern = v.equalsIgnoreCase("true") || v == "1";
+  }
+  if (doc["weatherLat"].is<float>() || doc["weatherLat"].is<double>() || doc["weatherLat"].is<int>()) {
+    next.weatherLat = doc["weatherLat"].as<float>();
+  }
+  if (doc["weatherLon"].is<float>() || doc["weatherLon"].is<double>() || doc["weatherLon"].is<int>()) {
+    next.weatherLon = doc["weatherLon"].as<float>();
+  }
+  if (doc["weatherTz"].is<const char *>()) {
+    next.weatherTz = doc["weatherTz"].as<String>();
+  }
+  if (doc["weatherFahrenheit"].is<bool>()) {
+    next.weatherFahrenheit = doc["weatherFahrenheit"].as<bool>();
+  }
+
+  auto fillStringArray = [](JsonDocument &d, const char *key, String *out) {
+    if (!d[key].is<JsonArray>()) {
+      return;
+    }
+    JsonArray arr = d[key].as<JsonArray>();
+    for (size_t i = 0; i < arr.size() && i < kMaxWidgets; ++i) {
+      out[i] = arr[i].as<String>();
+    }
+  };
+  fillStringArray(doc, "widgetTopics", next.widgetTopics);
+  fillStringArray(doc, "widgetLabels", next.widgetLabels);
+  fillStringArray(doc, "widgetTypes", next.widgetTypes);
+  fillStringArray(doc, "widgetPaths", next.widgetPaths);
+  fillStringArray(doc, "widgetTz", next.widgetTz);
+
   cfg_ = next;
   if (saveToFlash) {
     return save(cfg_);

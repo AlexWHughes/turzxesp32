@@ -10,6 +10,7 @@
 #include "turzx_log.h"
 #include "turzx_rev_c.h"
 #include "web_ui.h"
+#include "widget_engine.h"
 #include "wifi_service.h"
 
 namespace {
@@ -18,6 +19,7 @@ WifiService wifiService;
 WebUi webUi;
 OtaService otaService;
 MqttHa mqttHa;
+WidgetEngine widgetEngine;
 TurzxTransport *transport = nullptr;
 TurzxRevC *display = nullptr;
 Dashboard dashboard;
@@ -27,14 +29,38 @@ bool panelReady = false;
 bool panelAttempted = false;
 }  // namespace
 
+static TurzxOrientation orientationFromConfig(uint8_t value) {
+  switch (value) {
+    case 0:
+      return TurzxOrientation::Portrait;
+    case 1:
+      return TurzxOrientation::ReversePortrait;
+    case 2:
+      return TurzxOrientation::Landscape;
+    case 3:
+      return TurzxOrientation::ReverseLandscape;
+    default: {
+      const uint8_t unreachable = value;
+      (void)unreachable;
+      return TurzxOrientation::Landscape;
+    }
+  }
+}
+
 static void applyRuntimeConfig(const AppConfig &cfg) {
+  const bool orientationChanged =
+      display && display->isReady() &&
+      display->orientation() != orientationFromConfig(cfg.orientation);
   if (display && display->isReady()) {
     display->setBrightness(cfg.brightness);
-    display->setOrientation(cfg.orientation == 0 ? TurzxOrientation::Portrait
-                                                 : TurzxOrientation::Landscape);
+    display->setOrientation(orientationFromConfig(cfg.orientation));
   }
   dashboard.applyConfig(cfg);
-  dashboard.forceRedraw();
+  widgetEngine.applyConfig(cfg);
+  // Orientation resize needs a full frame; other saves dirty widgets themselves.
+  if (orientationChanged) {
+    dashboard.forceRedraw();
+  }
   mqttHa.applyConfig(cfg);
 }
 
@@ -42,12 +68,12 @@ static String currentClockString() {
   struct tm timeinfo {};
   if (!getLocalTime(&timeinfo, 50)) {
     char buf[16];
-    snprintf(buf, sizeof(buf), "%02lu:%02lu:%02lu", (millis() / 3600000UL) % 24,
-             (millis() / 60000UL) % 60, (millis() / 1000UL) % 60);
+    snprintf(buf, sizeof(buf), "%02lu:%02lu", (millis() / 3600000UL) % 24,
+             (millis() / 60000UL) % 60);
     return String(buf);
   }
   char buf[16];
-  strftime(buf, sizeof(buf), "%H:%M:%S", &timeinfo);
+  strftime(buf, sizeof(buf), "%H:%M", &timeinfo);
   return String(buf);
 }
 
@@ -69,6 +95,7 @@ static void tryInitPanel() {
 
   panelReady = true;
   const AppConfig &cfg = configStore.get();
+  display->setOrientation(orientationFromConfig(cfg.orientation));
   TURZX_LOGI("Panel ready: %s", display->displayId().c_str());
   webUi.setStatus("panel-ready");
   if (!dashboard.begin(*display, cfg)) {
@@ -78,6 +105,7 @@ static void tryInitPanel() {
     webUi.setStatus("running-no-panel");
     return;
   }
+  widgetEngine.applyConfig(cfg);
   dashboard.forceRedraw();
   dashboard.tick();
   display->setBrightness(cfg.brightness);
@@ -102,6 +130,9 @@ void setup() {
     TURZX_LOGW("STA failed — AP Turzx-Setup / turzxsetup @ http://192.168.4.1/");
   }
 
+  widgetEngine.begin(dashboard);
+  widgetEngine.applyConfig(cfg);
+
   webUi.begin(
       configStore,
       [](const AppConfig &updated) {
@@ -123,14 +154,12 @@ void setup() {
     if (topic == configStore.get().haStatusTopic && payload == "online") {
       mqttHa.publishHaDiscovery();
     }
-    dashboard.setWidgetValue(topic, payload);
+    widgetEngine.onMqttMessage(topic, payload);
   });
 
 #if TURZX_LOG_UART
-  // UART build: OTG is free for the panel immediately; logs stay on CH343.
   TURZX_LOGI("UART logging — starting panel USB host now");
 #else
-  // OTG-debug build: USB host kills the monitor port — delay for readable logs.
   TURZX_LOGI("Panel USB host starts at t=20s (OTG serial will drop; use WebUI)");
 #endif
   webUi.setStatus("running-no-panel");
@@ -141,6 +170,7 @@ void loop() {
   webUi.loop();
   otaService.loop();
   mqttHa.loop();
+  widgetEngine.loop();
 
   if (panelReady && transport && !transport->isReady()) {
     TURZX_LOGW("Panel link lost — it will sleep instead of holding the stored image");
@@ -158,10 +188,8 @@ void loop() {
 #if TURZX_LOG_UART
     const bool pastBootWindow = true;
 #else
-    // OTG-debug: wait so boot logs are visible before USB host takes the PHY.
     const bool pastBootWindow = now >= 20000;
 #endif
-    // Retry at most every 5s — polling every loop floods the UART log.
     if (pastBootWindow && (!panelAttempted || (now - lastPanelRetryMs) >= 5000)) {
       lastPanelRetryMs = now;
       tryInitPanel();

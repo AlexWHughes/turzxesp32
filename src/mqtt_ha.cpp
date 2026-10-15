@@ -27,7 +27,7 @@ void MqttHa::begin(const AppConfig &cfg, MqttMessageHandler handler) {
   gHandler = handler;
   mqtt.setServer(cfg_.mqttHost.c_str(), cfg_.mqttPort);
   mqtt.setCallback(mqttCallback);
-  mqtt.setBufferSize(1024);
+  mqtt.setBufferSize(2048);
   started_ = true;
 }
 
@@ -38,7 +38,11 @@ void MqttHa::applyConfig(const AppConfig &cfg) {
 }
 
 void MqttHa::subscribeAll() {
-  for (int i = 0; i < 6; ++i) {
+  for (int i = 0; i < kMaxWidgets; ++i) {
+    const String &type = cfg_.widgetTypes[i];
+    if (type != "mqtt_text" && type != "mqtt_json") {
+      continue;
+    }
     if (cfg_.widgetTopics[i].length()) {
       mqtt.subscribe(cfg_.widgetTopics[i].c_str());
       Serial.printf("[mqtt] subscribe %s\n", cfg_.widgetTopics[i].c_str());

@@ -7,6 +7,7 @@
 
 #include <cstring>
 
+#include "http_server.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_private/usb_phy.h"
@@ -154,8 +155,13 @@ class TurzxUsbTransport : public TurzxTransport {
         break;
       }
       sent += chunk;
+      // Do not call httpServer().handleClient() while txMutex_ is held — request
+      // handlers can re-enter transport write (brightness/config) and deadlock
+      // or corrupt an in-flight frame. Yield only; HTTP is serviced after unlock.
+      yield();
     }
     xSemaphoreGive(txMutex_);
+    httpServer().handleClient();
     return sent;
   }
 
@@ -471,10 +477,30 @@ class TurzxUsbTransport : public TurzxTransport {
     return resetIssued;
   }
 
+  // Ownership of in-flight control transfers: first of (callback signal |
+  // caller timeout) that moves state out of kLive owns cleanup when the other
+  // side observes the final state. Avoids the previous intentional leak on
+  // timeout (panel retry called hubCtrl every few seconds).
+  enum CtrlXferState : int { kCtrlLive = 0, kCtrlSignaled = 1, kCtrlAbandoned = 2 };
+  struct CtrlXferCtx {
+    SemaphoreHandle_t sem = nullptr;
+    volatile int state = kCtrlLive;
+  };
+
   static void ctrlDone(usb_transfer_t *transfer) {
-    auto *sem = static_cast<SemaphoreHandle_t>(transfer->context);
-    if (sem) {
-      xSemaphoreGive(sem);
+    auto *ctx = static_cast<CtrlXferCtx *>(transfer->context);
+    if (!ctx) {
+      usb_host_transfer_free(transfer);
+      return;
+    }
+    const int prev = __atomic_exchange_n(&ctx->state, kCtrlSignaled, __ATOMIC_ACQ_REL);
+    if (prev == kCtrlAbandoned) {
+      usb_host_transfer_free(transfer);
+      free(ctx);
+      return;
+    }
+    if (ctx->sem) {
+      xSemaphoreGive(ctx->sem);
     }
   }
 
@@ -488,11 +514,18 @@ class TurzxUsbTransport : public TurzxTransport {
     if (usb_host_transfer_alloc(sizeof(usb_setup_packet_t) + wLength, 0, &xfer) != ESP_OK || !xfer) {
       return -1;
     }
+    auto *ctx = static_cast<CtrlXferCtx *>(calloc(1, sizeof(CtrlXferCtx)));
+    if (!ctx) {
+      usb_host_transfer_free(xfer);
+      return -1;
+    }
+    ctx->sem = ctrlSem_;
+    ctx->state = kCtrlLive;
     xfer->device_handle = hub;
     xfer->bEndpointAddress = 0;
     xfer->timeout_ms = 500;
     xfer->callback = &TurzxUsbTransport::ctrlDone;
-    xfer->context = ctrlSem_;
+    xfer->context = ctx;
     xfer->num_bytes = sizeof(usb_setup_packet_t) + wLength;
     auto *req = reinterpret_cast<usb_setup_packet_t *>(xfer->data_buffer);
     req->bmRequestType = bmRequestType;
@@ -507,10 +540,17 @@ class TurzxUsbTransport : public TurzxTransport {
     xSemaphoreTake(ctrlSem_, 0);
     if (usb_host_transfer_submit_control(probeClient_, xfer) != ESP_OK) {
       usb_host_transfer_free(xfer);
+      free(ctx);
       return -1;
     }
     if (xSemaphoreTake(ctrlSem_, pdMS_TO_TICKS(800)) != pdTRUE) {
-      // Leave the transfer allocated; the callback may still run.
+      const int prev = __atomic_exchange_n(&ctx->state, kCtrlAbandoned, __ATOMIC_ACQ_REL);
+      if (prev == kCtrlSignaled) {
+        (void)xSemaphoreTake(ctrlSem_, 0);
+        usb_host_transfer_free(xfer);
+        free(ctx);
+      }
+      // else callback still owns cleanup when the transfer completes
       return -1;
     }
     int got = -1;
@@ -526,6 +566,7 @@ class TurzxUsbTransport : public TurzxTransport {
       }
     }
     usb_host_transfer_free(xfer);
+    free(ctx);
     return got;
   }
 

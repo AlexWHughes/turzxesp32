@@ -5,10 +5,11 @@
 
 #include "turzx_transport.h"
 
+// Integer values match mathoudebine Orientation IntEnum (lcd_comm.py).
 enum class TurzxOrientation : uint8_t {
   Portrait = 0,
-  Landscape = 1,
-  ReversePortrait = 2,
+  ReversePortrait = 1,
+  Landscape = 2,
   ReverseLandscape = 3,
 };
 

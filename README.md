@@ -1,14 +1,14 @@
 # TURZX ESP32-S3
 
-PlatformIO firmware for an **ESP32-S3** that drives a [Turing / TURZX 8.8"](https://github.com/mathoudebine/turing-smart-screen-python) **Rev C** panel over USB, serves a config WebUI, speaks MQTT / Home Assistant, and supports Wi‑Fi OTA.
+PlatformIO firmware for an **ESP32-S3** that drives a [Turing / TURZX 8.8"](https://github.com/mathoudebine/turing-smart-screen-python) **Rev C** panel over USB, serves a control WebUI, speaks MQTT / Home Assistant, and supports Wi‑Fi OTA.
 
 **Repo:** [github.com/AlexWHughes/turzxesp32](https://github.com/AlexWHughes/turzxesp32)
 
 ## Features
 
-- TURZX / Turing **Rev C** USB serial protocol (480×1920 portrait · 1920×480 landscape)
-- Live dashboard with up to **6 MQTT widgets**
-- Embedded WebUI for Wi‑Fi, MQTT, brightness, orientation, and widgets
+- TURZX / Turing **Rev C** USB serial protocol (480×1920 · 1920×480, with flip variants)
+- Typed widget library (up to 6 slots): MQTT text, MQTT JSON path, world clocks, Open‑Meteo weather, Spotify Now Playing
+- Grid or carousel layout, brightness, orientation, and full‑resolution **test pattern** from the WebUI
 - Home Assistant MQTT discovery (`turzx/status`)
 - HTTP OTA + ArduinoOTA (`turzx-esp32`)
 - Captive setup AP when no Wi‑Fi is configured
@@ -55,16 +55,18 @@ git clone https://github.com/AlexWHughes/turzxesp32.git
 cd turzxesp32
 ```
 
-### 2. Secrets (Wi‑Fi / MQTT defaults)
+### 2. Secrets
 
 `include/secrets.h` is **gitignored** and never leaves your machine.
 
 ```bash
 cp include/secrets.h.example include/secrets.h
-# edit WIFI_SSID / WIFI_PASSWORD (and optional MQTT_*)
+# edit WIFI_SSID / WIFI_PASSWORD (and optional MQTT_* / SPOTIFY_*)
 ```
 
-Values apply only when no SSID is stored in flash yet. The WebUI can override them later.
+**Spotify Now Playing** (optional): create an app in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard), run an Authorization Code flow once on a computer with scopes `user-read-currently-playing` / `user-read-playback-state`, then put `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`, and `SPOTIFY_REFRESH_TOKEN` in `secrets.h`.
+
+Values apply only when no SSID is stored in flash yet. The WebUI can override Wi‑Fi/MQTT later.
 
 If you skip secrets entirely, first boot opens AP **`Turzx-Setup`** / password **`turzxsetup`** at `http://192.168.4.1/`.
 
@@ -90,10 +92,26 @@ Expect on UART monitor: `[turzx] STA IP …`, then USB host / panel diag. WebUI 
 
 ### 4. Configure
 
-Open `http://<device-ip>/` for MQTT widgets, brightness, and orientation.
+Open `http://<device-ip>/`:
+
+- **Display** — brightness, orientation (portrait / landscape / flipped), grid vs carousel, test pattern
+- **Widgets** — slot type + fields (MQTT topic / JSON path / UTC offset); weather uses lat/lon/timezone
+- **Connections** — Wi‑Fi / MQTT (collapsed)
+
+Test pattern draws full‑width colour bars, a 1px border, corner marks, and centred `WxH` so you can confirm the panel is showing the full frame.
 
 - HTTP OTA: `http://<device-ip>/update`
 - ArduinoOTA hostname: `turzx-esp32`
+
+## Widget types
+
+| Type | Source |
+|------|--------|
+| MQTT text | Raw MQTT payload |
+| MQTT JSON | MQTT payload + simple path (`main.temp`, `item.0.name`) |
+| World clock | NTP + per-slot UTC offset (`UTC+10`, `UTC-5:30`) |
+| Weather | [Open‑Meteo](https://open-meteo.com/) using WebUI lat/lon/timezone (no API key) |
+| Spotify | Spotify Web API Currently Playing (tokens in `secrets.h` only) |
 
 ## PlatformIO environments
 
@@ -107,7 +125,7 @@ Open `http://<device-ip>/` for MQTT widgets, brightness, and orientation.
 
 ```text
 include/       headers + secrets.h.example
-src/           firmware (Rev C driver, USB/UART transport, dashboard, MQTT, WebUI, OTA)
+src/           firmware (Rev C driver, USB/UART transport, dashboard, widgets, MQTT, WebUI, OTA)
 lib/           vendored usb_host_cdc_acm (build sources only)
 third_party/   ESP-IDF USB host private headers (patched enum support)
 tools/         optional Mac panel smoke test
