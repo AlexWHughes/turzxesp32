@@ -108,15 +108,14 @@ Open `http://<device-ip>/` for MQTT widgets, brightness, and orientation.
 ```text
 include/       headers + secrets.h.example
 src/           firmware (Rev C driver, USB/UART transport, dashboard, MQTT, WebUI, OTA)
-data/          LittleFS WebUI reference copy
-lib/           vendored usb_host_cdc_acm
+lib/           vendored usb_host_cdc_acm (build sources only)
 third_party/   ESP-IDF USB host private headers (patched enum support)
-tools/         Mac panel smoke test script + notes
+tools/         optional Mac panel smoke test
 ```
 
 ## Mac panel smoke test (optional)
 
-Verify the panel directly from a Mac before flashing firmware — see [tools/smoke_test.md](tools/smoke_test.md).
+Verify the panel directly from a Mac before flashing firmware — see [tools/smoke_test.md](tools/smoke_test.md). Clone the upstream Python project into `tools/` only when you need that test; it is gitignored and must not be a nested git repo inside this project.
 
 ## Protocol reference
 

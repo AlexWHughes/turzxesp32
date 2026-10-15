@@ -1,5 +1,7 @@
 # Mac smoke test — TURZX 8.8" Rev C
 
+Optional check that the panel works from a Mac before flashing firmware.
+
 ## Confirmed device fingerprint
 
 - `UsbMonitor` `1a86:ca88` serial `CT88INCH` (wake)
@@ -10,11 +12,13 @@
 
 ```bash
 cd tools
+git clone --depth 1 https://github.com/mathoudebine/turing-smart-screen-python.git turing-smart-screen-python
+# Important: do not keep that clone as a nested git repo if Cursor/VS Code
+# Source Control gets confused — either delete the folder when done, or:
+#   rm -rf turing-smart-screen-python/.git
 python3 -m venv turing-smart-screen-python/.venv
 source turing-smart-screen-python/.venv/bin/activate
 pip install pyserial pillow numpy pyyaml
-# clone once:
-# git clone --depth 1 https://github.com/mathoudebine/turing-smart-screen-python.git turing-smart-screen-python
 python smoke_test_rev_c.py
 ```
 
