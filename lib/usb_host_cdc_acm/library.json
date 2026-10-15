@@ -1,0 +1,19 @@
+{
+  "name": "usb_host_cdc_acm",
+  "version": "2.4.1",
+  "build": {
+    "includeDir": "include",
+    "flags": [
+      "-Iinclude",
+      "-Iinterface",
+      "-Iprivate_include",
+      "-Iinclude/esp_private"
+    ],
+    "srcFilter": [
+      "+<cdc_acm_host.c>",
+      "+<cdc_host_descriptor_parsing.c>",
+      "+<cdc_host_acm_compliant.c>",
+      "+<cdc_host_ops.c>"
+    ]
+  }
+}
