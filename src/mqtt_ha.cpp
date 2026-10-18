@@ -32,9 +32,15 @@ void MqttHa::begin(const AppConfig &cfg, MqttMessageHandler handler) {
 }
 
 void MqttHa::applyConfig(const AppConfig &cfg) {
+  if (cfg_.mqttEnabled && !cfg.mqttEnabled && mqtt.connected()) {
+    // Clean disconnect does not send the LWT; clear retained online before drop.
+    mqtt.publish("turzx/status", "offline", true);
+  }
   cfg_ = cfg;
   mqtt.disconnect();
   mqtt.setServer(cfg_.mqttHost.c_str(), cfg_.mqttPort);
+  failStreak_ = 0;
+  reconnectDelayMs_ = 0;
 }
 
 void MqttHa::subscribeAll() {
@@ -70,6 +76,8 @@ void MqttHa::ensureConnected() {
   }
   if (ok) {
     Serial.println("[mqtt] connected");
+    failStreak_ = 0;
+    reconnectDelayMs_ = 0;
     mqtt.publish("turzx/status", "online", true);
     subscribeAll();
     if (cfg_.haDiscovery) {
@@ -77,6 +85,17 @@ void MqttHa::ensureConnected() {
     }
   } else {
     Serial.printf("[mqtt] failed rc=%d\n", mqtt.state());
+    if (failStreak_ < 12) {
+      ++failStreak_;
+    }
+    // Auth failures (rc=4/5) will not self-heal — back off hard to avoid DNS/TLS churn.
+    const uint32_t base = cfg_.mqttReconnectMs ? cfg_.mqttReconnectMs : 5000;
+    uint32_t delayMs = base << (failStreak_ > 3 ? failStreak_ - 3 : 0);
+    if (delayMs > 300000UL) {
+      delayMs = 300000UL;
+    }
+    reconnectDelayMs_ = delayMs;
+    Serial.printf("[mqtt] next try in %lu ms\n", static_cast<unsigned long>(reconnectDelayMs_));
   }
 }
 
@@ -84,9 +103,18 @@ void MqttHa::loop() {
   if (!started_) {
     return;
   }
+  if (!cfg_.mqttEnabled) {
+    if (mqtt.connected()) {
+      // Clean disconnect does not send the LWT, so publish retained offline first.
+      mqtt.publish("turzx/status", "offline", true);
+      mqtt.disconnect();
+    }
+    return;
+  }
   static uint32_t lastTry = 0;
   if (!mqtt.connected()) {
-    if (millis() - lastTry > cfg_.mqttReconnectMs) {
+    const uint32_t waitMs = reconnectDelayMs_ ? reconnectDelayMs_ : cfg_.mqttReconnectMs;
+    if (millis() - lastTry > waitMs) {
       lastTry = millis();
       ensureConnected();
     }

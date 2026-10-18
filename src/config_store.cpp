@@ -33,6 +33,24 @@ static void applySecrets(AppConfig &cfg) {
     cfg.mqttPassword = MQTT_PASSWORD;
   }
 #endif
+#if defined(SPOTIFY_CLIENT_ID)
+  if (cfg.spotifyClientId.isEmpty() && SPOTIFY_CLIENT_ID[0] != '\0' &&
+      strcmp(SPOTIFY_CLIENT_ID, "your_client_id") != 0) {
+    cfg.spotifyClientId = SPOTIFY_CLIENT_ID;
+  }
+#endif
+#if defined(SPOTIFY_CLIENT_SECRET)
+  if (cfg.spotifyClientSecret.isEmpty() && SPOTIFY_CLIENT_SECRET[0] != '\0' &&
+      strcmp(SPOTIFY_CLIENT_SECRET, "your_client_secret") != 0) {
+    cfg.spotifyClientSecret = SPOTIFY_CLIENT_SECRET;
+  }
+#endif
+#if defined(SPOTIFY_REFRESH_TOKEN)
+  if (cfg.spotifyRefreshToken.isEmpty() && SPOTIFY_REFRESH_TOKEN[0] != '\0' &&
+      strcmp(SPOTIFY_REFRESH_TOKEN, "your_refresh_token") != 0) {
+    cfg.spotifyRefreshToken = SPOTIFY_REFRESH_TOKEN;
+  }
+#endif
 }
 
 static void applyWidgetDefaults(AppConfig &cfg) {
@@ -104,6 +122,9 @@ bool ConfigStore::load(AppConfig &cfg) {
       cfg.clockIntervalMs = 15000;
     }
     cfg.haDiscovery = prefs.getBool("haDisc", cfg.haDiscovery);
+    cfg.mqttEnabled = prefs.getBool("mqttOn", cfg.mqttEnabled);
+    cfg.weatherEnabled = prefs.getBool("wxOn", cfg.weatherEnabled);
+    cfg.spotifyEnabled = prefs.getBool("spOn", cfg.spotifyEnabled);
     {
       const uint8_t layoutRaw =
           prefs.getUChar("layout", static_cast<uint8_t>(LayoutMode::Grid));
@@ -113,10 +134,18 @@ bool ConfigStore::load(AppConfig &cfg) {
     }
     cfg.carouselIntervalMs = prefs.getUShort("carMs", cfg.carouselIntervalMs);
     cfg.testPattern = prefs.getBool("testPat", cfg.testPattern);
+    cfg.theme = prefs.getString("theme", cfg.theme);
+    if (cfg.theme != "aurora" && cfg.theme != "ember" && cfg.theme != "forest" &&
+        cfg.theme != "neon" && cfg.theme != "paper" && cfg.theme != "midnight") {
+      cfg.theme = "aurora";
+    }
     cfg.weatherLat = prefs.getFloat("wLat", cfg.weatherLat);
     cfg.weatherLon = prefs.getFloat("wLon", cfg.weatherLon);
     cfg.weatherTz = prefs.getString("wTz", cfg.weatherTz);
     cfg.weatherFahrenheit = prefs.getBool("wF", cfg.weatherFahrenheit);
+    cfg.spotifyClientId = prefs.getString("spId", cfg.spotifyClientId);
+    cfg.spotifyClientSecret = prefs.getString("spSec", cfg.spotifyClientSecret);
+    cfg.spotifyRefreshToken = prefs.getString("spRef", cfg.spotifyRefreshToken);
 
     for (int i = 0; i < kMaxWidgets; ++i) {
       cfg.widgetTopics[i] = prefs.getString(("wTopic" + String(i)).c_str(), cfg.widgetTopics[i]);
@@ -158,13 +187,20 @@ bool ConfigStore::save(const AppConfig &cfg) {
   prefs.putUChar("orMap", 1);
   prefs.putUShort("clockMs", cfg.clockIntervalMs);
   prefs.putBool("haDisc", cfg.haDiscovery);
+  prefs.putBool("mqttOn", cfg.mqttEnabled);
+  prefs.putBool("wxOn", cfg.weatherEnabled);
+  prefs.putBool("spOn", cfg.spotifyEnabled);
   prefs.putUChar("layout", static_cast<uint8_t>(cfg.layoutMode));
   prefs.putUShort("carMs", cfg.carouselIntervalMs);
   prefs.putBool("testPat", cfg.testPattern);
+  prefs.putString("theme", cfg.theme);
   prefs.putFloat("wLat", cfg.weatherLat);
   prefs.putFloat("wLon", cfg.weatherLon);
   prefs.putString("wTz", cfg.weatherTz);
   prefs.putBool("wF", cfg.weatherFahrenheit);
+  prefs.putString("spId", cfg.spotifyClientId);
+  prefs.putString("spSec", cfg.spotifyClientSecret);
+  prefs.putString("spRef", cfg.spotifyRefreshToken);
   for (int i = 0; i < kMaxWidgets; ++i) {
     prefs.putString(("wTopic" + String(i)).c_str(), cfg.widgetTopics[i]);
     prefs.putString(("wLabel" + String(i)).c_str(), cfg.widgetLabels[i]);
@@ -193,13 +229,25 @@ String ConfigStore::toJson(bool includeSecrets) const {
   doc["orientation"] = cfg_.orientation;
   doc["clockIntervalMs"] = cfg_.clockIntervalMs;
   doc["haDiscovery"] = cfg_.haDiscovery;
+  doc["mqttEnabled"] = cfg_.mqttEnabled;
+  doc["weatherEnabled"] = cfg_.weatherEnabled;
+  doc["spotifyEnabled"] = cfg_.spotifyEnabled;
   doc["layoutMode"] = layoutModeToString(cfg_.layoutMode);
   doc["carouselIntervalMs"] = cfg_.carouselIntervalMs;
   doc["testPattern"] = cfg_.testPattern;
+  doc["theme"] = cfg_.theme;
   doc["weatherLat"] = cfg_.weatherLat;
   doc["weatherLon"] = cfg_.weatherLon;
   doc["weatherTz"] = cfg_.weatherTz;
   doc["weatherFahrenheit"] = cfg_.weatherFahrenheit;
+  doc["spotifyClientId"] = cfg_.spotifyClientId;
+  doc["spotifyHasSecret"] = cfg_.spotifyClientSecret.length() > 0;
+  doc["spotifyHasRefresh"] = cfg_.spotifyRefreshToken.length() > 0;
+  doc["spotifyRedirectUri"] = "http://127.0.0.1:8888/callback";
+  if (includeSecrets) {
+    doc["spotifyClientSecret"] = cfg_.spotifyClientSecret;
+    doc["spotifyRefreshToken"] = cfg_.spotifyRefreshToken;
+  }
 
   JsonArray types = doc["widgetTypes"].to<JsonArray>();
   JsonArray topics = doc["widgetTopics"].to<JsonArray>();
@@ -267,6 +315,15 @@ bool ConfigStore::applyJson(const String &json, bool saveToFlash) {
   if (doc["haDiscovery"].is<bool>()) {
     next.haDiscovery = doc["haDiscovery"].as<bool>();
   }
+  if (doc["mqttEnabled"].is<bool>()) {
+    next.mqttEnabled = doc["mqttEnabled"].as<bool>();
+  }
+  if (doc["weatherEnabled"].is<bool>()) {
+    next.weatherEnabled = doc["weatherEnabled"].as<bool>();
+  }
+  if (doc["spotifyEnabled"].is<bool>()) {
+    next.spotifyEnabled = doc["spotifyEnabled"].as<bool>();
+  }
   if (doc["layoutMode"].is<const char *>()) {
     next.layoutMode = layoutModeFromString(doc["layoutMode"].as<String>());
   }
@@ -278,6 +335,13 @@ bool ConfigStore::applyJson(const String &json, bool saveToFlash) {
       carMs = 65535;
     }
     next.carouselIntervalMs = static_cast<uint16_t>(carMs);
+  }
+  if (doc["theme"].is<const char *>()) {
+    const String theme = doc["theme"].as<String>();
+    if (theme == "aurora" || theme == "ember" || theme == "forest" || theme == "neon" ||
+        theme == "paper" || theme == "midnight") {
+      next.theme = theme;
+    }
   }
   if (doc["testPattern"].is<bool>()) {
     next.testPattern = doc["testPattern"].as<bool>();
@@ -298,6 +362,21 @@ bool ConfigStore::applyJson(const String &json, bool saveToFlash) {
   }
   if (doc["weatherFahrenheit"].is<bool>()) {
     next.weatherFahrenheit = doc["weatherFahrenheit"].as<bool>();
+  }
+  if (doc["spotifyClientId"].is<const char *>()) {
+    next.spotifyClientId = doc["spotifyClientId"].as<String>();
+  }
+  if (doc["spotifyClientSecret"].is<const char *>()) {
+    const String secret = doc["spotifyClientSecret"].as<String>();
+    if (secret.length()) {
+      next.spotifyClientSecret = secret;
+    }
+  }
+  if (doc["spotifyRefreshToken"].is<const char *>()) {
+    const String token = doc["spotifyRefreshToken"].as<String>();
+    if (token.length()) {
+      next.spotifyRefreshToken = token;
+    }
   }
 
   auto fillStringArray = [](JsonDocument &d, const char *key, String *out) {

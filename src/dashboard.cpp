@@ -6,12 +6,6 @@
 #include <esp_heap_caps.h>
 
 namespace {
-constexpr uint16_t COLOR_BG = 0x10A2;
-constexpr uint16_t COLOR_PANEL = 0x2124;
-constexpr uint16_t COLOR_ACCENT = 0x07FF;
-constexpr uint16_t COLOR_TEXT = 0xFFFF;
-constexpr uint16_t COLOR_MUTED = 0xAD55;
-constexpr uint16_t COLOR_VALUE = 0x07E0;
 constexpr uint16_t COLOR_RED = 0xF800;
 constexpr uint16_t COLOR_GREEN = 0x07E0;
 constexpr uint16_t COLOR_BLUE = 0x001F;
@@ -86,7 +80,7 @@ bool Dashboard::ensureCanvas() {
     Serial.println("[dash] blit scratch alloc failed — partials will use heap");
   }
   for (size_t i = 0; i < static_cast<size_t>(canvasW_) * canvasH_; ++i) {
-    canvas_[i] = COLOR_BG;
+    canvas_[i] = themeBg_;
   }
   fullDirty_ = true;
   return true;
@@ -116,10 +110,17 @@ void Dashboard::layoutWidgets() {
   const int16_t margin = 24;
   const int16_t gap = 16;
   const int16_t clockH = 96;
-  clockWidget_.x = margin;
-  clockWidget_.y = margin;
-  clockWidget_.w = canvasW_ - margin * 2;
-  clockWidget_.h = clockH;
+  auto place = [this](DashboardWidget &widget, int16_t x, int16_t y, int16_t w, int16_t h) {
+    if (widget.x == x && widget.y == y && widget.w == w && widget.h == h) {
+      return;
+    }
+    widget.x = x;
+    widget.y = y;
+    widget.w = w;
+    widget.h = h;
+    markDirty(widget);
+  };
+  place(clockWidget_, margin, margin, canvasW_ - margin * 2, clockH);
 
   const int16_t top = margin + clockH + gap;
   const int16_t areaH = canvasH_ - top - margin;
@@ -133,11 +134,7 @@ void Dashboard::layoutWidgets() {
       if (!w.active) {
         continue;
       }
-      w.x = margin;
-      w.y = top;
-      w.w = canvasW_ - margin * 2;
-      w.h = areaH;
-      w.dirty = true;
+      place(w, margin, top, canvasW_ - margin * 2, areaH);
     }
     return;
   }
@@ -154,18 +151,15 @@ void Dashboard::layoutWidgets() {
     }
     const int col = idx % cols;
     const int row = idx / cols;
-    w.x = margin + col * (cellW + gap);
-    w.y = top + row * (cellH + gap);
-    w.w = cellW;
-    w.h = cellH;
-    w.dirty = true;
+    place(w, margin + col * (cellW + gap), top + row * (cellH + gap), cellW, cellH);
     ++idx;
   }
 }
 
 void Dashboard::applyConfig(const AppConfig &cfg) {
+  const bool themeChanged = cfg.theme != cfg_.theme;
   const bool layoutChanged =
-      cfg.layoutMode != cfg_.layoutMode || cfg.testPattern != cfg_.testPattern;
+      cfg.layoutMode != cfg_.layoutMode || cfg.testPattern != cfg_.testPattern || themeChanged;
   bool slotsChanged = layoutChanged;
   if (!slotsChanged) {
     // Compare which slots are active / typed — geometry depends on that.
@@ -204,22 +198,35 @@ void Dashboard::applyConfig(const AppConfig &cfg) {
   // (label-only saves). Type/topic changes must not keep stale MQTT/weather text.
   String preservedValue[kMaxWidgets];
   String preservedSecondary[kMaxWidgets];
+  String preservedLabel[kMaxWidgets];
   String preservedType[kMaxWidgets];
   String preservedTopic[kMaxWidgets];
+  int16_t preservedX[kMaxWidgets] = {};
+  int16_t preservedY[kMaxWidgets] = {};
+  int16_t preservedW[kMaxWidgets] = {};
+  int16_t preservedH[kMaxWidgets] = {};
+  bool preservedHad[kMaxWidgets] = {};
   for (const auto &w : widgets_) {
     if (w.id.length() >= 2 && w.id[0] == 'w') {
       const int idx = w.id.substring(1).toInt();
       if (idx >= 0 && idx < kMaxWidgets) {
         preservedValue[idx] = w.value;
         preservedSecondary[idx] = w.secondary;
+        preservedLabel[idx] = w.label;
         preservedType[idx] = w.type;
         preservedTopic[idx] = w.topic;
+        preservedX[idx] = w.x;
+        preservedY[idx] = w.y;
+        preservedW[idx] = w.w;
+        preservedH[idx] = w.h;
+        preservedHad[idx] = true;
       }
     }
   }
   const String preservedClock = clockWidget_.value;
 
   cfg_ = cfg;
+  loadTheme();
   ensureCanvas();
   widgets_.clear();
   for (int i = 0; i < kMaxWidgets; ++i) {
@@ -233,22 +240,28 @@ void Dashboard::applyConfig(const AppConfig &cfg) {
     w.topic = cfg.widgetTopics[i];
     w.type = type;
     const bool sameSource =
-        preservedType[i] == type && preservedTopic[i] == cfg.widgetTopics[i];
+        preservedHad[i] && preservedType[i] == type && preservedTopic[i] == cfg.widgetTopics[i];
     if (sameSource) {
       w.value = preservedValue[i].isEmpty() ? "--" : preservedValue[i];
       w.secondary = preservedSecondary[i];
+      w.x = preservedX[i];
+      w.y = preservedY[i];
+      w.w = preservedW[i];
+      w.h = preservedH[i];
     } else {
       w.value = "--";
       w.secondary = "";
     }
     w.active = true;
-    w.dirty = true;
+    const bool textChanged = !sameSource || preservedLabel[i] != w.label;
+    if (textChanged) {
+      markDirty(w);
+    }
     widgets_.push_back(w);
   }
   clockWidget_.id = "clock";
   clockWidget_.label = "Local";
   clockWidget_.value = preservedClock.isEmpty() ? "--:--" : preservedClock;
-  clockWidget_.dirty = true;
   if (slotsChanged || layoutChanged) {
     carouselIndex_ = 0;
     lastCarouselMs_ = millis();
@@ -259,6 +272,94 @@ void Dashboard::applyConfig(const AppConfig &cfg) {
   if (slotsChanged || layoutChanged || cfg.testPattern) {
     fullDirty_ = true;
   }
+}
+
+void Dashboard::loadTheme() {
+  struct Theme {
+    const char *id;
+    uint16_t bg;
+    uint16_t panel;
+    uint16_t accent;
+    uint16_t text;
+    uint16_t muted;
+    uint16_t value;
+  };
+  auto pack = [](uint8_t r, uint8_t g, uint8_t b) -> uint16_t {
+    return static_cast<uint16_t>(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+  };
+  const Theme themes[] = {
+      {"aurora", pack(10, 14, 36), pack(28, 36, 78), pack(124, 92, 255), pack(244, 241, 255),
+       pack(154, 163, 199), pack(94, 234, 212)},
+      {"ember", pack(20, 10, 8), pack(54, 28, 16), pack(255, 106, 42), pack(255, 244, 234),
+       pack(196, 164, 142), pack(255, 210, 122)},
+      {"forest", pack(6, 20, 14), pack(16, 46, 30), pack(61, 220, 110), pack(232, 246, 236),
+       pack(142, 174, 152), pack(214, 242, 92)},
+      {"neon", pack(6, 6, 18), pack(22, 16, 44), pack(255, 43, 214), pack(247, 247, 255),
+       pack(157, 157, 190), pack(57, 255, 210)},
+      {"paper", pack(244, 239, 230), pack(255, 252, 246), pack(31, 75, 153), pack(26, 26, 26),
+       pack(92, 86, 78), pack(14, 107, 79)},
+      {"midnight", 0x10A2, 0x2124, 0x07FF, 0xFFFF, 0xAD55, 0x07E0},
+  };
+  const Theme *chosen = &themes[0];
+  for (const Theme &theme : themes) {
+    if (cfg_.theme == theme.id) {
+      chosen = &theme;
+      break;
+    }
+  }
+  themeBg_ = chosen->bg;
+  themePanel_ = chosen->panel;
+  themeAccent_ = chosen->accent;
+  themeText_ = chosen->text;
+  themeMuted_ = chosen->muted;
+  themeValue_ = chosen->value;
+}
+
+void Dashboard::markSpotifyDirty() {
+  for (auto &w : widgets_) {
+    if (w.active && w.type == "spotify") {
+      markDirty(w);
+    }
+  }
+}
+
+void Dashboard::setAlbumArt(const uint16_t *pixels, int16_t width, int16_t height) {
+  if (!pixels || width <= 0 || height <= 0 || width > 320 || height > 320) {
+    clearAlbumArt();
+    return;
+  }
+  const size_t pixelsN = static_cast<size_t>(width) * static_cast<size_t>(height);
+  if (artW_ != width || artH_ != height || !art_) {
+    if (art_) {
+      free(art_);
+      art_ = nullptr;
+    }
+    art_ = static_cast<uint16_t *>(
+        heap_caps_malloc(pixelsN * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (!art_) {
+      art_ = static_cast<uint16_t *>(malloc(pixelsN * sizeof(uint16_t)));
+    }
+    if (!art_) {
+      artW_ = 0;
+      artH_ = 0;
+      return;
+    }
+    artW_ = width;
+    artH_ = height;
+  }
+  memcpy(art_, pixels, pixelsN * sizeof(uint16_t));
+  markSpotifyDirty();
+}
+
+void Dashboard::clearAlbumArt() {
+  if (!art_) {
+    return;
+  }
+  free(art_);
+  art_ = nullptr;
+  artW_ = 0;
+  artH_ = 0;
+  markSpotifyDirty();
 }
 
 void Dashboard::setSlot(int index, const String &label, const String &value,
@@ -273,7 +374,7 @@ void Dashboard::setSlot(int index, const String &label, const String &value,
       w.label = effectiveLabel;
       w.value = value;
       w.secondary = secondary;
-      w.dirty = true;
+      markDirty(w);
     }
     return;
   }
@@ -282,11 +383,14 @@ void Dashboard::setSlot(int index, const String &label, const String &value,
 void Dashboard::setClock(const String &clockText) {
   if (clockWidget_.value != clockText) {
     clockWidget_.value = clockText;
-    clockWidget_.dirty = true;
+    markDirty(clockWidget_);
   }
 }
 
-void Dashboard::forceRedraw() { fullDirty_ = true; }
+void Dashboard::forceRedraw() {
+  fullDirty_ = true;
+  fullBandY_ = -1;
+}
 
 void Dashboard::fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color) {
   if (!canvas_ || w <= 0 || h <= 0) {
@@ -317,9 +421,35 @@ void Dashboard::fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t co
   }
 }
 
-void Dashboard::drawText(int16_t x, int16_t y, const String &text, uint16_t color, uint8_t scale) {
+void Dashboard::setPixel(int16_t x, int16_t y, uint16_t color) {
+  if (!canvas_ || x < 0 || y < 0 || x >= static_cast<int16_t>(canvasW_) ||
+      y >= static_cast<int16_t>(canvasH_)) {
+    return;
+  }
+  canvas_[static_cast<size_t>(y) * canvasW_ + x] = color;
+}
+
+void Dashboard::blitArt(int16_t x, int16_t y, int16_t w, int16_t h) {
+  if (!art_ || artW_ <= 0 || artH_ <= 0 || w <= 0 || h <= 0) {
+    return;
+  }
+  for (int16_t row = 0; row < h; ++row) {
+    const int16_t sy = static_cast<int16_t>((static_cast<int32_t>(row) * artH_) / h);
+    const uint16_t *src = art_ + static_cast<size_t>(sy) * artW_;
+    for (int16_t col = 0; col < w; ++col) {
+      const int16_t sx = static_cast<int16_t>((static_cast<int32_t>(col) * artW_) / w);
+      setPixel(x + col, y + row, src[sx]);
+    }
+  }
+}
+
+void Dashboard::drawText(int16_t x, int16_t y, const String &text, uint16_t color, uint8_t scale,
+                         int16_t maxX) {
   int16_t cursor = x;
   for (size_t i = 0; i < text.length(); ++i) {
+    if (cursor + 6 * scale > maxX) {
+      break;
+    }
     char c = text[i];
     if (c < 32 || c > 90) {
       if (c >= 'a' && c <= 'z') {
@@ -343,15 +473,35 @@ void Dashboard::drawText(int16_t x, int16_t y, const String &text, uint16_t colo
 }
 
 void Dashboard::renderWidget(const DashboardWidget &w, bool large) {
-  fillRect(w.x, w.y, w.w, w.h, COLOR_PANEL);
-  fillRect(w.x, w.y, large ? 10 : 6, w.h, COLOR_ACCENT);
+  fillRect(w.x, w.y, w.w, w.h, themePanel_);
+  int16_t textX = w.x + (large ? 28 : 18);
+  const int16_t textRight = w.x + w.w - 12;
+  const bool showArt = w.type == "spotify" && art_ != nullptr;
+  if (showArt) {
+    const int16_t pad = 14;
+    int16_t side = w.h - pad * 2;
+    const int16_t maxSide = w.w / 2;
+    if (side > maxSide) {
+      side = maxSide;
+    }
+    if (side < 24) {
+      side = 24;
+    }
+    const int16_t artX = w.x + pad;
+    const int16_t artY = w.y + (w.h - side) / 2;
+    fillRect(artX - 2, artY - 2, side + 4, side + 4, themeAccent_);
+    blitArt(artX, artY, side, side);
+    textX = artX + side + 16;
+  } else {
+    fillRect(w.x, w.y, large ? 10 : 6, w.h, themeAccent_);
+  }
   const uint8_t labelScale = large ? 3 : 2;
   const uint8_t valueScale = large ? 5 : 3;
   const uint8_t secScale = large ? 3 : 2;
-  drawText(w.x + 20, w.y + (large ? 28 : 18), w.label, COLOR_MUTED, labelScale);
-  drawText(w.x + 20, w.y + (large ? 90 : 52), w.value, COLOR_VALUE, valueScale);
+  drawText(textX, w.y + (large ? 28 : 18), w.label, themeMuted_, labelScale, textRight);
+  drawText(textX, w.y + (large ? 90 : 52), w.value, themeValue_, valueScale, textRight);
   if (w.secondary.length()) {
-    drawText(w.x + 20, w.y + w.h - (large ? 60 : 36), w.secondary, COLOR_TEXT, secScale);
+    drawText(textX, w.y + w.h - (large ? 60 : 36), w.secondary, themeText_, secScale, textRight);
   }
 }
 
@@ -394,13 +544,13 @@ void Dashboard::renderTestPattern() {
 
   String res = String(canvasW_) + "x" + String(canvasH_);
   const int16_t textW = static_cast<int16_t>(res.length() * 6 * 4);
-  drawText((canvasW_ - textW) / 2, canvasH_ / 2 - 14, res, COLOR_BLACK, 4);
-  drawText((canvasW_ - textW) / 2 + 2, canvasH_ / 2 - 12, res, COLOR_WHITE, 4);
+  drawText((canvasW_ - textW) / 2, canvasH_ / 2 - 14, res, COLOR_BLACK, 4, canvasW_);
+  drawText((canvasW_ - textW) / 2 + 2, canvasH_ / 2 - 12, res, COLOR_WHITE, 4, canvasW_);
 }
 
-void Dashboard::blitRegion(int16_t x, int16_t y, int16_t w, int16_t h) {
+bool Dashboard::blitRegion(int16_t x, int16_t y, int16_t w, int16_t h) {
   if (!display_ || !canvas_) {
-    return;
+    return false;
   }
   if (x < 0) {
     w += x;
@@ -417,7 +567,7 @@ void Dashboard::blitRegion(int16_t x, int16_t y, int16_t w, int16_t h) {
     h = canvasH_ - y;
   }
   if (w <= 0 || h <= 0) {
-    return;
+    return false;
   }
 
   const size_t need = static_cast<size_t>(w) * static_cast<size_t>(h);
@@ -435,15 +585,49 @@ void Dashboard::blitRegion(int16_t x, int16_t y, int16_t w, int16_t h) {
   }
   if (!region) {
     Serial.println("[dash] blitRegion OOM");
-    return;
+    return false;
   }
   for (int16_t row = 0; row < h; ++row) {
     memcpy(region + static_cast<size_t>(row) * w, canvas_ + (y + row) * canvasW_ + x,
            static_cast<size_t>(w) * sizeof(uint16_t));
   }
-  display_->displayRegionRgb565(region, x, y, w, h);
+  const bool ok = display_->displayRegionRgb565(region, x, y, w, h);
   if (heapTemp) {
     free(region);
+  }
+  return ok;
+}
+
+void Dashboard::paintFullCanvas() {
+  if (cfg_.testPattern) {
+    renderTestPattern();
+  } else {
+    fillRect(0, 0, canvasW_, canvasH_, themeBg_);
+    renderWidget(clockWidget_, false);
+    if (cfg_.layoutMode == LayoutMode::Carousel) {
+      int idx = 0;
+      for (auto &w : widgets_) {
+        if (!w.active) {
+          continue;
+        }
+        if (idx == carouselIndex_) {
+          renderWidget(w, true);
+          break;
+        }
+        ++idx;
+      }
+    } else {
+      for (auto &w : widgets_) {
+        if (!w.active) {
+          continue;
+        }
+        renderWidget(w, false);
+      }
+    }
+  }
+  clockWidget_.dirty = false;
+  for (auto &w : widgets_) {
+    w.dirty = false;
   }
 }
 
@@ -452,14 +636,28 @@ void Dashboard::tick() {
     return;
   }
 
-  if (cfg_.testPattern) {
-    if (fullDirty_) {
-      renderTestPattern();
-      if (display_->displayFullRgb565(canvas_, canvasW_, canvasH_)) {
-        fullDirty_ = false;
-      }
-      // Keep fullDirty_ set on failure so the next tick retries.
+  if (fullDirty_) {
+    paintFullCanvas();
+    fullBandY_ = 0;
+    fullDirty_ = false;
+  }
+
+  // One strip per tick. A full 1920×480 frame is about 3.7 MB and used to
+  // block the panel for minutes before any new pixels showed up.
+  if (fullBandY_ >= 0 && fullBandY_ < static_cast<int16_t>(canvasH_)) {
+    constexpr int16_t kBand = 80;
+    int16_t bandH = kBand;
+    if (fullBandY_ + bandH > static_cast<int16_t>(canvasH_)) {
+      bandH = static_cast<int16_t>(canvasH_) - fullBandY_;
     }
+    if (blitRegion(0, fullBandY_, canvasW_, bandH)) {
+      fullBandY_ += bandH;
+    }
+    return;
+  }
+  fullBandY_ = -1;
+
+  if (cfg_.testPattern) {
     return;
   }
 
@@ -483,40 +681,9 @@ void Dashboard::tick() {
     }
   }
 
-  if (fullDirty_) {
-    fillRect(0, 0, canvasW_, canvasH_, COLOR_BG);
-    renderWidget(clockWidget_, false);
-    clockWidget_.dirty = false;
-
-    if (cfg_.layoutMode == LayoutMode::Carousel) {
-      int idx = 0;
-      for (auto &w : widgets_) {
-        if (!w.active) {
-          continue;
-        }
-        if (idx == carouselIndex_) {
-          renderWidget(w, true);
-          w.dirty = false;
-          break;
-        }
-        ++idx;
-      }
-    } else {
-      for (auto &w : widgets_) {
-        if (!w.active) {
-          continue;
-        }
-        renderWidget(w, false);
-        w.dirty = false;
-      }
-    }
-    display_->displayFullRgb565(canvas_, canvasW_, canvasH_);
-    fullDirty_ = false;
-    return;
-  }
-
-  // One USB region per tick so loop() can service HTTP / MQTT between blits.
-  // Prefer widget content over the clock so config/MQTT changes appear first.
+  // One USB region per tick. The newest change goes out first so a text edit
+  // is not stuck behind every other card.
+  DashboardWidget *newest = nullptr;
   if (cfg_.layoutMode == LayoutMode::Carousel) {
     int idx = 0;
     for (auto &w : widgets_) {
@@ -524,10 +691,8 @@ void Dashboard::tick() {
         continue;
       }
       if (idx == carouselIndex_ && w.dirty) {
-        renderWidget(w, true);
-        blitRegion(w.x, w.y, w.w, w.h);
-        w.dirty = false;
-        return;
+        newest = &w;
+        break;
       }
       ++idx;
     }
@@ -536,11 +701,16 @@ void Dashboard::tick() {
       if (!w.active || !w.dirty) {
         continue;
       }
-      renderWidget(w, false);
-      blitRegion(w.x, w.y, w.w, w.h);
-      w.dirty = false;
-      return;
+      if (newest == nullptr || w.dirtySeq >= newest->dirtySeq) {
+        newest = &w;
+      }
     }
+  }
+  if (newest != nullptr) {
+    renderWidget(*newest, cfg_.layoutMode == LayoutMode::Carousel);
+    blitRegion(newest->x, newest->y, newest->w, newest->h);
+    newest->dirty = false;
+    return;
   }
 
   if (clockWidget_.dirty) {

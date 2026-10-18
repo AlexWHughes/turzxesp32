@@ -27,15 +27,25 @@ struct AppConfig {
   uint16_t clockIntervalMs = 15000;
   uint16_t mqttReconnectMs = 5000;
   bool haDiscovery = true;
+  // Off skips broker reconnects, Open-Meteo fetches, and Spotify TLS polls.
+  bool mqttEnabled = true;
+  bool weatherEnabled = true;
+  bool spotifyEnabled = true;
 
   LayoutMode layoutMode = LayoutMode::Grid;
   uint16_t carouselIntervalMs = 8000;
   bool testPattern = false;
+  // aurora | ember | forest | neon | paper | midnight
+  String theme = "aurora";
 
   float weatherLat = -37.8136f;
   float weatherLon = 144.9631f;
   String weatherTz = "Australia/Melbourne";
   bool weatherFahrenheit = false;
+
+  String spotifyClientId;
+  String spotifyClientSecret;
+  String spotifyRefreshToken;
 
   // Per-slot: type = mqtt_text|mqtt_json|world_clock|weather|spotify|off
   String widgetTypes[kMaxWidgets];

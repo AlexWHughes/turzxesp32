@@ -23,6 +23,15 @@ PlatformIO firmware for an **ESP32-S3** that drives a [Turing / TURZX 8.8"](http
 | Wake | `1a86:ca88` UsbMonitor / `CT88INCH` |
 | Data | `0525:a4a7` Gadget Serial |
 
+### Boards tested
+
+| Board | Result |
+|-------|--------|
+| [Freenove](https://github.com/Freenove) **ESP32-S3-WROOM** | Works — native USB OTG drives the panel |
+| Lonely Binary **ESP32-S3-WROOM01** | Does **not** work for the panel — no voltage on USB OTG (D+/D− only; panel needs its own 5 V, and this board’s OTG path is unsuitable) |
+
+Any ESP32-S3 with PSRAM and a true USB-OTG host port should work. Prefer boards that expose OTG with host-capable wiring (GPIO19/20) and keep the panel on a separate 5 V supply.
+
 ## Wiring (no cable swapping)
 
 On **ESP32-S3-DevKitC** the silkscreen has two sockets:

@@ -6,6 +6,13 @@
 #include "config_store.h"
 #include "dashboard.h"
 
+// Exchanges a Spotify authorization-code callback URL for a refresh token.
+// redirectUri must match the URI registered on the Spotify app and used in the authorize link.
+bool spotifyExchangeAuthCode(const String &clientId, const String &clientSecret, const String &pasted,
+                             const String &redirectUri, String &refreshTokenOut, String &errorOut);
+
+inline const char *spotifyRedirectUri() { return "http://127.0.0.1:8888/callback"; }
+
 class WidgetEngine {
  public:
   void begin(Dashboard &dashboard);
@@ -15,9 +22,13 @@ class WidgetEngine {
 
  private:
   void refreshWorldClocks();
+  void refreshLocalWidgets();
+  bool spotifyReady() const;
   bool pollWeather();
-  void pollSpotify();
+  bool pollSpotify();
   bool refreshSpotifyToken();
+  void updateAlbumArt(const String &imageUrl);
+  void clearAlbumArt();
   void configureSpotifyTls(WiFiClientSecure &client) const;
   String extractJsonPath(const String &json, const String &path) const;
   int parseUtcOffsetMinutes(const String &tz) const;
@@ -32,10 +43,15 @@ class WidgetEngine {
   uint32_t spotifyTokenExpiryMs_ = 0;
   uint32_t lastWeatherMs_ = 0;
   uint32_t lastSpotifyMs_ = 0;
+  uint32_t spotifyPollPeriodMs_ = 0;
   uint32_t lastClockMs_ = 0;
   bool weatherOk_ = false;
   String weatherPrimary_;
   String weatherSecondary_;
+  String sunRise_;
+  String sunSet_;
   String spotifyPrimary_;
   String spotifySecondary_;
+  String artUrl_;
+  String artFailUrl_;
 };
