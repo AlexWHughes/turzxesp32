@@ -18,4 +18,6 @@ class TurzxTransport {
   virtual String diag() const { return String(); }
   /** Hotplug retry: reopen CDC if a device appeared after begin(). */
   virtual bool poll() { return isReady(); }
+  /** True when a new USB device was seen and open has not been attempted yet. */
+  virtual bool hotplugPending() const { return false; }
 };

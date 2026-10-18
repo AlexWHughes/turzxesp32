@@ -22,7 +22,7 @@ class TurzxRevC {
 
   bool begin();
   void end();
-  bool isReady() const { return ready_; }
+  bool isReady() const { return ready_ && transport_.isReady(); }
 
   bool setBrightness(uint8_t percent);
   bool setOrientation(TurzxOrientation orientation);

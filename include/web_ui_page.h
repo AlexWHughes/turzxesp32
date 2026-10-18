@@ -73,12 +73,25 @@ static const char kWebUiPage[] PROGMEM = R"HTML(<!DOCTYPE html>
     }
     .slot h3 { margin: 0 0 6px; font-size: 13px; color: var(--muted); }
     .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+    .checks { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 8px; }
+    .checks label { display: flex; align-items: center; gap: 8px; margin: 0; color: var(--text); font-size: 14px; }
+    .checks input { width: auto; }
     .hidden { display: none !important; }
     .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 14px; }
   </style>
 </head>
 <body>
   <header><span class="status" id="status">…</span></header>
+
+  <section style="margin-bottom:14px;">
+    <h2>Background services</h2>
+    <p class="hint">Turn a service off to stop its reconnects and HTTPS polls. Widget settings stay saved.</p>
+    <div class="checks">
+      <label><input id="mqttEnabled" type="checkbox" checked /> MQTT</label>
+      <label><input id="weatherEnabled" type="checkbox" checked /> Weather</label>
+      <label><input id="spotifyEnabled" type="checkbox" checked /> Spotify</label>
+    </div>
+  </section>
 
   <div class="grid">
     <section>
@@ -91,6 +104,15 @@ static const char kWebUiPage[] PROGMEM = R"HTML(<!DOCTYPE html>
         <option value="1">Portrait flipped</option>
         <option value="2">Landscape (1920×480)</option>
         <option value="3">Landscape flipped</option>
+      </select>
+      <label>Theme</label>
+      <select id="theme">
+        <option value="aurora">Aurora</option>
+        <option value="ember">Ember</option>
+        <option value="forest">Forest</option>
+        <option value="neon">Neon</option>
+        <option value="paper">Paper</option>
+        <option value="midnight">Midnight</option>
       </select>
       <label>Layout</label>
       <select id="layoutMode">
@@ -125,6 +147,23 @@ static const char kWebUiPage[] PROGMEM = R"HTML(<!DOCTYPE html>
         <option value="false">Celsius</option>
         <option value="true">Fahrenheit</option>
       </select>
+    </section>
+
+    <section>
+      <h2>Spotify</h2>
+      <p class="hint">Now playing includes album art on the Spotify widget. In the Spotify app settings, add this redirect URI exactly:</p>
+      <p class="hint" id="spotifyRedirect">http://127.0.0.1:8888/callback</p>
+      <label>Client ID</label>
+      <input id="spotifyClientId" autocomplete="off" />
+      <label>Client secret</label>
+      <input id="spotifyClientSecret" type="password" placeholder="unchanged if blank" autocomplete="off" />
+      <label>Refresh token</label>
+      <input id="spotifyRefreshToken" type="password" placeholder="unchanged if blank" autocomplete="off" />
+      <p class="hint" id="spotifyTokenHint">No refresh token saved</p>
+      <button class="secondary" id="spotifyLogin" type="button">Open Spotify login</button>
+      <label>Paste the browser address after login (it will fail to load, and contains code=)</label>
+      <input id="spotifyCallback" placeholder="http://127.0.0.1:8888/callback?code=..." />
+      <button class="secondary" id="spotifyExchange" type="button">Save refresh token</button>
     </section>
 
     <section style="grid-column: 1 / -1;">
@@ -179,6 +218,10 @@ static const char kWebUiPage[] PROGMEM = R"HTML(<!DOCTYPE html>
       ["mqtt_json", "MQTT JSON"],
       ["world_clock", "World clock"],
       ["weather", "Weather"],
+      ["sun", "Sunrise / sunset"],
+      ["date", "Date"],
+      ["system", "System"],
+      ["note", "Note"],
       ["spotify", "Spotify now playing"]
     ];
 
@@ -208,8 +251,9 @@ static const char kWebUiPage[] PROGMEM = R"HTML(<!DOCTYPE html>
           '<div class="tz-fields">' +
             "<label>UTC offset (e.g. UTC+10)</label><input data-tz=\"" + i + "\" value=\"" + esc((cfg.widgetTz || [])[i]) + "\" />" +
           "</div>" +
-          '<p class="hint spotify-hint">Uses SPOTIFY_* from secrets.h</p>' +
-          '<p class="hint weather-hint">Uses Weather section above</p>' +
+          '<p class="hint spotify-hint">Uses the Spotify login below</p>' +
+          '<p class="hint weather-hint">Uses Weather coordinates above</p>' +
+          '<p class="hint sun-hint">Sunrise and sunset from the Weather location</p>' +
         "</div>"
       );
     }
@@ -217,10 +261,13 @@ static const char kWebUiPage[] PROGMEM = R"HTML(<!DOCTYPE html>
     function refreshSlotVisibility(slot) {
       const type = slot.querySelector("[data-type]").value;
       slot.querySelector(".mqtt-fields").classList.toggle("hidden", !(type === "mqtt_text" || type === "mqtt_json"));
-      slot.querySelector(".json-fields").classList.toggle("hidden", type !== "mqtt_json");
+      slot.querySelector(".json-fields").classList.toggle("hidden", !(type === "mqtt_json" || type === "note"));
+      const pathLabel = slot.querySelector(".json-fields label");
+      if (pathLabel) pathLabel.textContent = type === "note" ? "Text" : "JSON path (e.g. main.temp)";
       slot.querySelector(".tz-fields").classList.toggle("hidden", type !== "world_clock");
       slot.querySelector(".spotify-hint").classList.toggle("hidden", type !== "spotify");
       slot.querySelector(".weather-hint").classList.toggle("hidden", type !== "weather");
+      slot.querySelector(".sun-hint").classList.toggle("hidden", type !== "sun");
     }
 
     function wireSlots() {
@@ -247,14 +294,24 @@ static const char kWebUiPage[] PROGMEM = R"HTML(<!DOCTYPE html>
       document.getElementById("brightness").value = cfg.brightness ?? 40;
       document.getElementById("orientation").value = String(cfg.orientation ?? 2);
       document.getElementById("layoutMode").value = cfg.layoutMode || "grid";
+      document.getElementById("theme").value = cfg.theme || "aurora";
       document.getElementById("carouselIntervalMs").value = cfg.carouselIntervalMs ?? 8000;
       testPattern = !!cfg.testPattern;
       haDiscovery = cfg.haDiscovery !== false;
+      document.getElementById("mqttEnabled").checked = cfg.mqttEnabled !== false;
+      document.getElementById("weatherEnabled").checked = cfg.weatherEnabled !== false;
+      document.getElementById("spotifyEnabled").checked = cfg.spotifyEnabled !== false;
       setTestHint();
       document.getElementById("weatherLat").value = cfg.weatherLat ?? "";
       document.getElementById("weatherLon").value = cfg.weatherLon ?? "";
       document.getElementById("weatherTz").value = cfg.weatherTz || "";
       document.getElementById("weatherFahrenheit").value = cfg.weatherFahrenheit ? "true" : "false";
+      document.getElementById("spotifyClientId").value = cfg.spotifyClientId || "";
+      document.getElementById("spotifyRedirect").textContent =
+        cfg.spotifyRedirectUri || "http://127.0.0.1:8888/callback";
+      document.getElementById("spotifyTokenHint").textContent = cfg.spotifyHasRefresh
+        ? "Refresh token saved"
+        : "No refresh token saved";
       document.getElementById("wifiSsid").value = cfg.wifiSsid || "";
       document.getElementById("mqttHost").value = cfg.mqttHost || "";
       document.getElementById("mqttPort").value = cfg.mqttPort ?? 1883;
@@ -271,18 +328,23 @@ static const char kWebUiPage[] PROGMEM = R"HTML(<!DOCTYPE html>
         brightness: Number(document.getElementById("brightness").value),
         orientation: Number(document.getElementById("orientation").value),
         layoutMode: document.getElementById("layoutMode").value,
+        theme: document.getElementById("theme").value,
         carouselIntervalMs: Number(document.getElementById("carouselIntervalMs").value),
         testPattern: testPattern,
         weatherLat: Number(document.getElementById("weatherLat").value),
         weatherLon: Number(document.getElementById("weatherLon").value),
         weatherTz: document.getElementById("weatherTz").value,
         weatherFahrenheit: document.getElementById("weatherFahrenheit").value === "true",
+        spotifyClientId: document.getElementById("spotifyClientId").value,
         wifiSsid: document.getElementById("wifiSsid").value,
         mqttHost: document.getElementById("mqttHost").value,
         mqttPort: Number(document.getElementById("mqttPort").value),
         mqttClientId: document.getElementById("mqttClientId").value,
         mqttUser: document.getElementById("mqttUser").value,
         haDiscovery: haDiscovery,
+        mqttEnabled: document.getElementById("mqttEnabled").checked,
+        weatherEnabled: document.getElementById("weatherEnabled").checked,
+        spotifyEnabled: document.getElementById("spotifyEnabled").checked,
         widgetTypes: [...document.querySelectorAll("[data-type]")].map((el) => el.value),
         widgetLabels: [...document.querySelectorAll("[data-label]")].map((el) => el.value),
         widgetTopics: [...document.querySelectorAll("[data-topic]")].map((el) => el.value),
@@ -291,8 +353,12 @@ static const char kWebUiPage[] PROGMEM = R"HTML(<!DOCTYPE html>
       };
       const pass = document.getElementById("wifiPassword").value;
       const mqttPass = document.getElementById("mqttPassword").value;
+      const spotifySecret = document.getElementById("spotifyClientSecret").value;
+      const spotifyRefresh = document.getElementById("spotifyRefreshToken").value;
       if (pass) body.wifiPassword = pass;
       if (mqttPass) body.mqttPassword = mqttPass;
+      if (spotifySecret) body.spotifyClientSecret = spotifySecret;
+      if (spotifyRefresh) body.spotifyRefreshToken = spotifyRefresh;
       return body;
     }
 
@@ -328,10 +394,50 @@ static const char kWebUiPage[] PROGMEM = R"HTML(<!DOCTYPE html>
         testPattern ? "test pattern on" : "test pattern off";
     };
 
+    document.getElementById("spotifyLogin").onclick = () => {
+      const id = document.getElementById("spotifyClientId").value.trim();
+      const redirect = document.getElementById("spotifyRedirect").textContent.trim();
+      if (!id) {
+        document.getElementById("status").textContent = "enter a Spotify client id";
+        return;
+      }
+      const url = "https://accounts.spotify.com/authorize?response_type=code"
+        + "&client_id=" + encodeURIComponent(id)
+        + "&scope=" + encodeURIComponent("user-read-currently-playing user-read-playback-state")
+        + "&redirect_uri=" + encodeURIComponent(redirect)
+        + "&show_dialog=true";
+      window.open(url, "_blank", "noopener");
+    };
+
+    document.getElementById("spotifyExchange").onclick = async () => {
+      const body = {
+        clientId: document.getElementById("spotifyClientId").value,
+        callback: document.getElementById("spotifyCallback").value
+      };
+      const secret = document.getElementById("spotifyClientSecret").value;
+      if (secret) body.clientSecret = secret;
+      const res = await fetch("/api/spotify/exchange", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        document.getElementById("status").textContent = data.error || "spotify login failed";
+        return;
+      }
+      document.getElementById("spotifyCallback").value = "";
+      document.getElementById("spotifyClientSecret").value = "";
+      document.getElementById("spotifyRefreshToken").value = "";
+      document.getElementById("spotifyTokenHint").textContent = "Refresh token saved";
+      document.getElementById("status").textContent = "spotify token saved";
+    };
+
     async function refreshStatus() {
       try {
         const status = await fetch("/api/status").then((r) => r.json());
-        document.getElementById("status").textContent = status.status + " @ " + status.ip;
+        const issues = status.issues ? " — " + status.issues : "";
+        document.getElementById("status").textContent = status.status + " @ " + status.ip + issues;
       } catch (e) {}
     }
 

@@ -163,17 +163,21 @@ class ByteFramer {
 TurzxRevC::TurzxRevC(TurzxTransport &transport) : transport_(transport) {}
 
 bool TurzxRevC::begin() {
+  ready_ = false;
   if (!transport_.begin()) {
     return false;
   }
-  transport_.wakeDevice();
+  if (!transport_.isReady() && !transport_.wakeDevice()) {
+    return false;
+  }
   if (!transport_.isReady()) {
     return false;
   }
   if (!hello()) {
-    // Wake already turned the panel on. Power it back down instead of leaving
-    // the stored picture up.
-    screenOff();
+    // Protocol handshake failed. Drop the CDC handle so a later hotplug/retry
+    // can reopen cleanly — do not TURNOFF here (that re-enumerates and races
+    // with an already-present panel after a cable reconnect).
+    transport_.end();
     return false;
   }
   sendCommand(kStopVideo, sizeof(kStopVideo));

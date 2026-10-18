@@ -23,4 +23,6 @@ class MqttHa {
   AppConfig cfg_;
   MqttMessageHandler handler_;
   bool started_ = false;
+  uint32_t reconnectDelayMs_ = 0;
+  uint8_t failStreak_ = 0;
 };

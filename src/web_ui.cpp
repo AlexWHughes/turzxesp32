@@ -2,8 +2,11 @@
 
 #include <WiFi.h>
 
+#include <ArduinoJson.h>
+
 #include "http_server.h"
 #include "web_ui_page.h"
+#include "widget_engine.h"
 
 namespace {
 WebUi *gUi = nullptr;
@@ -38,6 +41,32 @@ void WebUi::begin(ConfigStore &store, ConfigChangedHandler onConfig,
     body += String(ESP.getFreeHeap());
     body += ",\"minFreeHeap\":";
     body += String(ESP.getMinFreeHeap());
+    body += ",\"freePsram\":";
+    body += String(ESP.getFreePsram());
+    body += ",\"maxAlloc\":";
+    body += String(ESP.getMaxAllocHeap());
+    body += ",\"issues\":\"";
+    if (gUi && gUi->store()) {
+      const AppConfig &cfg = gUi->store()->get();
+      String issues;
+      if (cfg.testPattern) {
+        issues += "test-pattern";
+      }
+      if (ESP.getFreeHeap() < 80000) {
+        if (issues.length()) {
+          issues += ",";
+        }
+        issues += "low-heap";
+      }
+      if (ESP.getMaxAllocHeap() < 32768) {
+        if (issues.length()) {
+          issues += ",";
+        }
+        issues += "heap-fragmented";
+      }
+      body += issues;
+    }
+    body += "\"";
     // diag kept for API consumers / debugging; not shown in the main WebUI.
     body += ",\"diag\":\"";
     if (gUi) {
@@ -120,6 +149,53 @@ void WebUi::begin(ConfigStore &store, ConfigChangedHandler onConfig,
     s.send(200, "application/json",
            cfg.testPattern ? "{\"ok\":true,\"testPattern\":true}"
                            : "{\"ok\":true,\"testPattern\":false}");
+  });
+
+  server.on("/api/spotify/exchange", HTTP_POST, []() {
+    WebServer &s = httpServer();
+    if (!gUi || !gUi->store()) {
+      s.send(500, "application/json", "{\"error\":\"no store\"}");
+      return;
+    }
+    JsonDocument doc;
+    if (deserializeJson(doc, s.arg("plain"))) {
+      s.send(400, "application/json", "{\"error\":\"bad json\"}");
+      return;
+    }
+    AppConfig cfg = gUi->store()->get();
+    if (doc["clientId"].is<const char *>()) {
+      const String id = doc["clientId"].as<String>();
+      if (id.length()) {
+        cfg.spotifyClientId = id;
+      }
+    }
+    if (doc["clientSecret"].is<const char *>()) {
+      const String secret = doc["clientSecret"].as<String>();
+      if (secret.length()) {
+        cfg.spotifyClientSecret = secret;
+      }
+    }
+    const String pasted = doc["callback"] | "";
+    String refresh;
+    String error;
+    if (!spotifyExchangeAuthCode(cfg.spotifyClientId, cfg.spotifyClientSecret, pasted,
+                                 spotifyRedirectUri(), refresh, error)) {
+      JsonDocument errDoc;
+      errDoc["error"] = error;
+      String body;
+      serializeJson(errDoc, body);
+      s.send(400, "application/json", body);
+      return;
+    }
+    cfg.spotifyRefreshToken = refresh;
+    if (!gUi->store()->save(cfg)) {
+      s.send(500, "application/json", "{\"error\":\"save failed\"}");
+      return;
+    }
+    if (gOnConfig) {
+      gOnConfig(cfg);
+    }
+    s.send(200, "application/json", "{\"ok\":true}");
   });
 
   server.begin();

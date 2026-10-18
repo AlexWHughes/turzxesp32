@@ -7,7 +7,6 @@
 
 #include <cstring>
 
-#include "http_server.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_private/usb_phy.h"
@@ -70,6 +69,8 @@ class TurzxUsbTransport : public TurzxTransport {
 
   bool isReady() const override { return dataDev_ != nullptr; }
 
+  bool hotplugPending() const override { return pendingOpen_ && dataDev_ == nullptr; }
+
   String diag() const override { return diag_; }
 
   bool poll() override {
@@ -77,8 +78,11 @@ class TurzxUsbTransport : public TurzxTransport {
       return begin();
     }
     if (dataDev_) {
+      pendingOpen_ = false;
       return true;
     }
+    // new_dev_cb / disconnect / ALL_FREE set pendingOpen_; main also polls on a timer.
+    pendingOpen_ = false;
     wakeDevice();
     return dataDev_ != nullptr;
   }
@@ -87,15 +91,24 @@ class TurzxUsbTransport : public TurzxTransport {
     dumpDeviceList();
     // Do not open the wake CDC here. Claiming it uses host channels and blocks
     // enumeration of the gadget on the hub's other port.
-    const bool powerCycled = probeBusIntoDiag(false);
-    if (powerCycled) {
-      vTaskDelay(pdMS_TO_TICKS(2000));
-      probeBusIntoDiag(false);
-    }
+    probeBusIntoDiag(false);
 
     if (tryOpenData()) {
+      pendingOpen_ = false;
       setDiag(String("gadget CDC open; bus=") + String(lastBusCount_) + probe_);
       return true;
+    }
+
+    // Hotplug: panel may sit on the hub without a fresh enumeration. Power-cycle
+    // port 2 so the host re-assigns an address, then try CDC open again.
+    if (probeBusIntoDiag(true)) {
+      vTaskDelay(pdMS_TO_TICKS(2000));
+      probeBusIntoDiag(false);
+      if (tryOpenData()) {
+        pendingOpen_ = false;
+        setDiag(String("gadget CDC open after cycle; bus=") + String(lastBusCount_) + probe_);
+        return true;
+      }
     }
 
     dumpDeviceList();
@@ -152,16 +165,19 @@ class TurzxUsbTransport : public TurzxTransport {
       esp_err_t err = cdc_acm_host_data_tx_blocking(dataDev_, data + sent, chunk, 3000);
       if (err != ESP_OK) {
         Serial.printf("[turzx] TX err %s\n", esp_err_to_name(err));
+        // Unplug often shows up as TX failure before (or without) a disconnect
+        // event. Drop the handle so isReady() goes false and main can reopen.
+        closeDevice(&dataDev_);
+        pendingOpen_ = true;
+        setDiag(String("tx-fail ") + esp_err_to_name(err) + "; awaiting hotplug");
         break;
       }
       sent += chunk;
-      // Do not call httpServer().handleClient() while txMutex_ is held — request
-      // handlers can re-enter transport write (brightness/config) and deadlock
-      // or corrupt an in-flight frame. Yield only; HTTP is serviced after unlock.
+      // Yield only. Servicing HTTP here lets a theme or test-pattern save mutate
+      // the canvas and send another USB command in the middle of this frame.
       yield();
     }
     xSemaphoreGive(txMutex_);
-    httpServer().handleClient();
     return sent;
   }
 
@@ -397,7 +413,9 @@ class TurzxUsbTransport : public TurzxTransport {
         .driver_task_stack_size = 4096,
         .driver_task_priority = 4,
         .xCoreID = 0,
-        .new_dev_cb = nullptr,
+        // Required for hotplug: without this, a panel plugged after boot is
+        // never noticed until a blind retry, and often never opens.
+        .new_dev_cb = &TurzxUsbTransport::newDevTrampoline,
     };
     err = cdc_acm_host_install(&cdcCfg);
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
@@ -419,6 +437,10 @@ class TurzxUsbTransport : public TurzxTransport {
       usb_host_lib_handle_events(portMAX_DELAY, &eventFlags);
       if (eventFlags & USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS) {
         usb_host_device_free_all();
+      }
+      if (eventFlags & USB_HOST_LIB_EVENT_FLAGS_ALL_FREE) {
+        // Keep pumping events so a replugged panel can re-enumerate.
+        pendingOpen_ = true;
       }
     }
   }
@@ -623,13 +645,26 @@ class TurzxUsbTransport : public TurzxTransport {
   }
 
   void onDevEvent(const cdc_acm_host_dev_event_data_t *event) {
-    if (!event || event->type != CDC_ACM_HOST_DEVICE_DISCONNECTED) {
+    if (!event) {
+      return;
+    }
+    if (event->type == CDC_ACM_HOST_ERROR) {
+      Serial.printf("[turzx] CDC error %d — dropping handle for hotplug retry\n",
+                    event->data.error);
+      closeDevice(&dataDev_);
+      pendingOpen_ = true;
+      setDiag("cdc-error; awaiting hotplug");
+      return;
+    }
+    if (event->type != CDC_ACM_HOST_DEVICE_DISCONNECTED) {
       return;
     }
     const cdc_acm_dev_hdl_t hdl = event->data.cdc_hdl;
     if (takeHandle(&dataDev_, hdl) || takeHandle(&wakeDev_, hdl)) {
       cdc_acm_host_close(hdl);
     }
+    pendingOpen_ = true;
+    setDiag("panel disconnected; awaiting hotplug");
   }
 
   bool onRx(const uint8_t *data, size_t dataLen) {
@@ -654,7 +689,9 @@ class TurzxUsbTransport : public TurzxTransport {
       return;
     }
     const cdc_acm_host_device_config_t devCfg = {
-        .connection_timeout_ms = 500,
+        // Hotplug needs more than 500 ms — hub re-enumeration after a cable
+        // plug often lands just after a short open times out.
+        .connection_timeout_ms = 2000,
         .out_buffer_size = writeOnly ? 64 : 1024,
         .in_buffer_size = writeOnly ? 0 : 1024,
         .event_cb = &TurzxUsbTransport::devEventTrampoline,
